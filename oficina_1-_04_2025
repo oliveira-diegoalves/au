@@ -1,0 +1,283 @@
+// =============================================
+// 1. Importar a bacia hidrográfica definido com os dados do IDE-SISEMA
+// =============================================
+// A variável 'bacia' armazena o vetor da bacia hidrográfica do Riachão
+// importado como uma FeatureCollection do repositório pessoal do usuário no Earth Engine
+var bacia = ee.FeatureCollection("projects/ee-oliveiradiegoalves/assets/bacia_riachao1"); // Importa o shapefile da bacia
+// Criar um retângulo envolvente com buffer de 15 km ao redor da geometria da bacia
+// Isso é útil para análises em áreas vizinhas à bacia, como séries climáticas
+var bboxComBuffer = bacia.geometry().bounds().buffer(15000); // Gera uma área de estudo ampliada com 15 km de margem
+// =============================================
+// 2. Inserir dados do dataset CHIRPS Daily (precipitação mensal acumulada desde 1981)
+// =============================================
+// Carregar coleção de imagens CHIRPS (diária)
+var chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY") // Coleção diária de precipitação do CHIRPS
+  .filterBounds(bboxComBuffer)  // Limita a área da coleção ao retângulo com buffer ao redor da bacia
+  .filterDate('1981-01-01', '2024-12-31');  // Define o intervalo de datas entre 1981 e 2024
+// Listas auxiliares para construir agregações mensais
+var listaAnos = ee.List.sequence(1981, 2024); // Lista de anos de 1981 até 2024
+var listaMeses = ee.List.sequence(1, 12); // Lista de meses de 1 a 12 (janeiro a dezembro)
+// Agregar imagens diárias para soma mensal da precipitação
+var chirpsMensal = ee.ImageCollection( // Cria uma nova coleção com precipitação acumulada por mês
+  listaAnos.map(function(ano) { // Para cada ano da lista
+    return listaMeses.map(function(mes) { // Para cada mês do ano
+      var inicio = ee.Date.fromYMD(ano, mes, 1); // Define a data de início do mês
+      var fim = inicio.advance(1, 'month'); // Define a data final avançando 1 mês
+      var somaMensal = chirps.filterDate(inicio, fim).sum() // Soma os valores diários de precipitação no mês
+        .set('ano', ano) // Atribui o ano como metadado
+        .set('mes', mes) // Atribui o mês como metadado
+        .set('system:time_start', inicio.millis()); // Define o tempo de início como timestamp para gráficos
+      return somaMensal; // Retorna a imagem com precipitação mensal
+    });
+  }).flatten() // Une todas as listas aninhadas em uma única lista plana
+);
+// =============================================
+// 2.1. Visualizar precipitação de janeiro de 1985 (CHIRPS mensal) recortada ao buffer da bacia
+// =============================================
+// Filtrar a imagem de janeiro de 1985
+var janeiro1985 = chirpsMensal
+  .filter(ee.Filter.calendarRange(1985, 1985, 'year'))
+  .filter(ee.Filter.calendarRange(1, 1, 'month'))
+  .first()
+  .clip(bboxComBuffer); // Recorta ao limite com buffer
+// Definir visualização
+var visChirps = {
+  min: 0,
+  max: 530, // Ajuste conforme necessário
+  palette: ['lightblue', 'blue', 'darkblue']
+};
+// Adicionar ao mapa
+Map.addLayer(janeiro1985, visChirps, 'CHIRPS - Jan 1985 (Recortado)');
+// =============================================
+// 3. Gráfico de série temporal mensal CHIRPS (média dos pixels)
+// =============================================
+// Gera gráfico com a média da precipitação mensal no buffer da bacia
+var chartSeries = ui.Chart.image.series({ // Cria um gráfico de série temporal a partir de uma ImageCollection
+  imageCollection: chirpsMensal, // Coleção de imagens CHIRPS com precipitação mensal
+  region: bboxComBuffer, // Região de análise (área da bacia com buffer)
+  reducer: ee.Reducer.mean(), // Redutor que calcula a média da precipitação sobre a região
+  scale: 5000, // Escala de amostragem (em metros) para calcular a média
+  xProperty: 'system:time_start' // Define o eixo X como a data de início de cada imagem
+}).setOptions({ // Define as opções de visualização do gráfico
+  title: 'Série Temporal - Precipitação Mensal (CHIRPS)', // Título do gráfico
+  hAxis: {title: 'Ano'}, // Rótulo do eixo horizontal (tempo)
+  vAxis: {title: 'Precipitação (mm)'}, // Rótulo do eixo vertical (precipitação)
+  lineWidth: 1, // Espessura da linha do gráfico
+  pointSize: 2, // Tamanho dos pontos nos dados
+  series: {0: {color: 'blue'}} // Cor da linha da série (azul)
+});
+// Exibe o gráfico no console do GEE
+print(chartSeries);
+// =============================================
+// 4. Inserir dados SRTM da USGS
+// =============================================
+// Carrega imagem de elevação SRTM com resolução de 30m
+var srtm = ee.Image("USGS/SRTMGL1_003"); // Dados de elevação global SRTM da USGS com 1 arco-segundo (~30m de resolução)
+// Recorta à área da bacia
+var srtmClip = srtm.clip(bacia); // Recorta a imagem SRTM para que cubra apenas a área da bacia delimitada
+// Adiciona o dado de elevação ao mapa com paleta em tons de cinza (branco = áreas mais baixas, preto = mais altas)
+Map.addLayer(srtmClip, 
+  {min: 600, max: 1000, palette: ['white', 'gray', 'black']}, 
+  'SRTM (Elevação)'); // Visualiza a altimetria do terreno com escala de 600 a 1000 metros
+// =============================================
+// 5. Adicionar Landsat 5 para os anos de 1985, 1992, 2008 e 2011
+// =============================================
+// Função que processa as imagens Landsat 5 para um ano específico
+function processarLandsat5(ano) {
+  var inicio = ano + '-01-01'; // Data inicial do ano no formato ISO (ex: "1985-01-01")
+  var fim = ano + '-12-31';    // Data final do ano no formato ISO (ex: "1985-12-31")
+  // Carrega a coleção Landsat 5 (nível 2 - reflectância de superfície)
+  var colecao = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
+    .filterBounds(bacia) // Filtra apenas as imagens que cobrem a área da bacia
+    .filterDate(inicio, fim) // Filtra as imagens dentro do intervalo do ano especificado
+    .filter(ee.Filter.lt('CLOUD_COVER', 90)) // Filtra imagens com menos de 50% de cobertura de nuvens
+    .map(function(image) { // Aplica função a cada imagem da coleção
+      var bandas = image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7']) // Seleciona as bandas ópticas de interesse
+        .multiply(0.0000275).add(-0.2) // Aplica o fator de escala e offset para conversão em reflectância
+        .rename(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7']); // Renomeia as bandas para manter consistência
+      return bandas.copyProperties(image, image.propertyNames()); // Retorna imagem com metadados preservados
+    });
+  var imagem = colecao.median(); // Calcula a mediana da coleção para gerar uma imagem composta do ano
+  // Adiciona composição de cor verdadeira (RGB: SR_B3, SR_B2, SR_B1)
+  Map.addLayer(imagem.select(['SR_B3', 'SR_B2', 'SR_B1']).clip(bacia),
+    {min: 0, max: 0.3}, 'Landsat 5 - True Color ' + ano); // Visualiza a composição de cor natural para o ano
+  // Adiciona composição de falsa cor vegetação (RGB: SR_B4, SR_B3, SR_B2)
+  Map.addLayer(imagem.select(['SR_B4', 'SR_B3', 'SR_B2']).clip(bacia),
+    {min: 0, max: 0.3}, 'Landsat 5 - Falsa Cor Vegetação ' + ano); // Realça vegetação saudável em tons de vermelho
+  // Adiciona composição de falsa cor umidade (RGB: SR_B5, SR_B4, SR_B3)
+  Map.addLayer(imagem.select(['SR_B5', 'SR_B4', 'SR_B3']).clip(bacia),
+    {min: 0, max: 0.3}, 'Landsat 5 - Falsa Cor Umidade ' + ano); // Realça áreas com maior teor de umidade
+  // Calcula o índice NDWI (Normalized Difference Water Index)
+  var ndwi = imagem.normalizedDifference(['SR_B2', 'SR_B4']).rename('NDWI_L5'); // Realça corpos d'água
+  // Adiciona o NDWI ao mapa com paleta de cores (marrom/bege para seco, azul para água)
+  Map.addLayer(ndwi.clip(bacia), {min: -1, max: 1, palette: ['brown', 'beige', 'blue']}, 'NDWI Landsat 5 ' + ano);
+}
+// Executa a função para os anos definidos
+[1985, 1992, 2008, 2011].forEach(processarLandsat5); // Aplica o processamento para cada ano da lista
+// =============================================
+// 6. Carregar Landsat 8 SR (T1) e aplicar máscara de nuvens
+// =============================================
+// Esta é a coleção de imagens do Landsat 8 para o ano ano hidrológico de 2016, com aplicação de máscara de nuvens e correção de reflectância
+var colecaoLandsat = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2") // Carrega a coleção de imagens do Landsat 8, nível 2 (Surface Reflectance)
+  .filterBounds(bacia) // Filtra imagens que cobrem a área da bacia hidrográfica
+  .filterDate('2015-10-01', '2016-04-30') // Filtra as imagens entre janeiro e dezembro de 2016
+  .map(function(image) { // Aplica uma função para mascarar nuvens e corrigir bandas
+    var qa = image.select('QA_PIXEL'); // Seleciona a banda de qualidade de pixels (QA_PIXEL), usada para identificar nuvens e sombras
+    var mask = qa.bitwiseAnd(1 << 3).eq(0) // Bit 3: sombra de nuvem (0 = sem sombra)
+      .and(qa.bitwiseAnd(1 << 4).eq(0))    // Bit 4: nuvem (0 = sem nuvem)
+      .and(qa.bitwiseAnd(1 << 5).eq(0));   // Bit 5: neve (0 = sem neve) — raramente aplicável, mas incluso por segurança
+    var bandasCorrigidas = image.select([
+      'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7' // Seleciona bandas ópticas corrigidas de reflectância de superfície
+    ])
+    .multiply(0.0000275).add(-0.2) // Aplica o fator de escala e offset recomendados pelo USGS para converter em reflectância
+    .rename(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7']) // Renomeia as bandas para manter consistência
+    .updateMask(mask); // Aplica a máscara de nuvens/sombras para remover pixels indesejados
+    return bandasCorrigidas.copyProperties(image, image.propertyNames()); // Retorna a imagem processada mantendo seus metadados originais
+  });
+// =============================================
+// 7. Carregar Sentinel-2 SR harmonizado e aplicar máscara de nuvens
+// =============================================
+// Esta coleção representa o Sentinel-2 com correção atmosférica (Surface Reflectance),
+// harmonizado entre os sensores S2A e S2B, e usada para análises consistentes ao longo do tempo.
+var colecaoS2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") // Carrega a coleção Sentinel-2 SR harmonizado
+  .filterBounds(bacia) // Filtra as imagens que cobrem a área da bacia hidrográfica
+  .filterDate('2020-10-01', '2021-04-30') // Filtra imagens entre janeiro e dezembro de 2021
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 90)) // Mantém apenas imagens com menos de 20% de cobertura de nuvens
+  .map(function(image) {
+    // Aplica máscara de nuvens baseada na banda QA60 (flags de qualidade)
+    var mask = image.select('QA60').bitwiseAnd(1 << 10).eq(0) // Verifica se o bit 10 (nuvem) está desligado
+      .and(image.select('QA60').bitwiseAnd(1 << 11).eq(0));   // Verifica se o bit 11 (cirrus) está desligado
+    return image.select([
+      'B2', 'B3', 'B4', 'B8', 'B11', 'B12' // Seleciona as bandas relevantes (azul, verde, vermelho, NIR, SWIR1, SWIR2)
+    ])
+    .divide(10000) // Converte os valores para reflectância de superfície (escala 0–1)
+    .updateMask(mask) // Aplica a máscara para remover pixels com nuvem ou cirrus
+    .copyProperties(image, image.propertyNames()); // Mantém as propriedades originais da imagem (como data, ID, etc.)
+  });
+// =============================================
+// 8. Redução das coleções e composições
+// =============================================
+// Calcula a mediana temporal da coleção Landsat (Landsat 5 + Landsat 8)
+var imagemLandsat = colecaoLandsat.median(); // Reduz a coleção Landsat ao pixel mediano em cada posição, para reduzir nuvens e ruído
+// Calcula a mediana temporal da coleção Sentinel-2
+var imagemS2 = colecaoS2.median(); // Reduz a coleção Sentinel-2 ao pixel mediano em cada posição, promovendo uma imagem mais limpa
+// --- Composições espectrais e índice para Landsat ---
+// Cria composição de cor verdadeira Landsat: bandas vermelho, verde e azul
+var trueColorL = imagemLandsat.select(['SR_B4', 'SR_B3', 'SR_B2']); // Visualização natural da superfície (True Color)
+// Cria composição de falsa cor vegetação Landsat: infravermelho próximo, vermelho e verde
+var falseColorVegL = imagemLandsat.select(['SR_B5', 'SR_B4', 'SR_B3']); // Realça vegetação saudável (verde brilhante)
+// Cria composição de falsa cor umidade Landsat: SWIR1, NIR e vermelho
+var falseColorMoistureL = imagemLandsat.select(['SR_B6', 'SR_B5', 'SR_B4']); // Destaca áreas úmidas (úteis para análise de solo e água)
+// Calcula o índice NDWI Landsat: (verde - NIR) / (verde + NIR)
+var ndwiL = imagemLandsat.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI_L'); // Índice que destaca corpos d’água
+// --- Composições espectrais e índice para Sentinel-2 ---
+// Cria composição de cor verdadeira Sentinel-2: bandas vermelho, verde e azul
+var trueColorS2 = imagemS2.select(['B4', 'B3', 'B2']); // Visualização natural da superfície (True Color)
+// Cria composição de falsa cor vegetação Sentinel-2: NIR, vermelho e verde
+var falseColorVegS2 = imagemS2.select(['B8', 'B4', 'B3']); // Realça vegetação com NIR (banda 8 do Sentinel-2)
+// Cria composição de falsa cor umidade Sentinel-2: SWIR1, NIR e vermelho
+var falseColorMoistureS2 = imagemS2.select(['B11', 'B8', 'B4']); // Realça umidade do solo e vegetação com banda SWIR
+// Calcula o índice NDWI Sentinel-2: (verde - NIR) / (verde + NIR)
+var ndwiS2 = imagemS2.normalizedDifference(['B3', 'B8']).rename('NDWI_S2'); // Índice de água baseado no Sentinel-2
+// =============================================
+// 9. Visualização
+// =============================================
+// Centraliza o mapa na área da bacia hidrográfica com nível de zoom 10
+Map.centerObject(bacia, 10);
+// Adiciona a composição Landsat em cor verdadeira, recortada pela bacia
+Map.addLayer(trueColorL.clip(bacia), {min: 0, max: 0.3}, 'Landsat - True Color'); // Visualização RGB (vermelho, verde, azul) representando a aparência natural da superfície
+// Adiciona a composição Landsat em falsa cor vegetação, recortada pela bacia
+Map.addLayer(falseColorVegL.clip(bacia), {min: 0, max: 0.3}, 'Landsat - Falsa Cor Vegetação'); // Realça vegetação usando bandas no infravermelho próximo
+// Adiciona a composição Landsat em falsa cor umidade, recortada pela bacia
+Map.addLayer(falseColorMoistureL.clip(bacia), {min: 0, max: 0.3}, 'Landsat - Falsa Cor Umidade'); // Realça áreas úmidas com bandas SWIR, NIR e verde
+// Adiciona o índice NDWI (Normalized Difference Water Index) do Landsat
+Map.addLayer(ndwiL.clip(bacia), {min: -1, max: 1, palette: ['brown', 'beige', 'blue']}, 'NDWI Landsat'); // Destaca corpos d'água (azul) e diferencia da vegetação e solo seco
+// Adiciona a composição Sentinel-2 em cor verdadeira, recortada pela bacia
+Map.addLayer(trueColorS2.clip(bacia), {min: 0, max: 0.3}, 'Sentinel-2 - True Color'); // Visualização RGB (aparência natural) com imagens Sentinel-2
+// Adiciona a composição Sentinel-2 em falsa cor vegetação, recortada pela bacia
+Map.addLayer(falseColorVegS2.clip(bacia), {min: 0, max: 0.3}, 'Sentinel-2 - Falsa Cor Vegetação'); // Realce da vegetação com bandas do Sentinel-2
+// Adiciona a composição Sentinel-2 em falsa cor umidade, recortada pela bacia
+Map.addLayer(falseColorMoistureS2.clip(bacia), {min: 0, max: 0.3}, 'Sentinel-2 - Falsa Cor Umidade'); // Destaca áreas com alta umidade usando bandas específicas do Sentinel-2
+// Adiciona o índice NDWI do Sentinel-2
+Map.addLayer(ndwiS2.clip(bacia), {min: -1, max: 1, palette: ['brown', 'beige', 'blue']}, 'NDWI Sentinel-2'); // Índice de água com base no Sentinel-2, útil para detectar corpos hídricos
+// =============================================
+// 10. MapBiomas 2023 - Usando Coleção 9
+// =============================================
+var mapbiomas = ee.Image("projects/mapbiomas-public/assets/brazil/lulc/collection9/mapbiomas_collection90_integration_v1"); // Carrega a imagem de uso e cobertura do solo da Coleção 9 do MapBiomas para todo o Brasil
+var uso2023 = mapbiomas.select('classification_2023').clip(bacia); // Seleciona a banda correspondente ao ano de 2023 e recorta à área da bacia
+// Define a paleta de cores oficial do MapBiomas (Coleção 9) para as classes de uso e cobertura do solo
+var palette = [
+  '#32a65e', // 1 - Floresta
+  '#1f8d49', // 3 - Formação Florestal
+  '#7dc975', // 4 - Formação Savânica
+  '#04381d', // 5 - Mangue
+  '#026975', // 6 - Floresta Alagável
+  '#02d659', // 49 - Restinga Arbórea
+  '#ad975a', // 10 - Vegetação Herbácea e Arbustiva
+  '#519799', // 11 - Campo Alagado e Área Pantanosa
+  '#d6bc74', // 12 - Formação Campestre
+  '#fc8114', // 32 - Apicum
+  '#ffaa5f', // 29 - Afloramento Rochoso
+  '#ad5100', // 50 - Restinga Herbácea
+  '#FFFFB2', // 14 - Agropecuária
+  '#edde8e', // 15 - Pastagem
+  '#E974ED', // 18 - Agricultura
+  '#C27BA0', // 19 - Lavoura Temporária
+  '#f5b3c8', // 39 - Soja
+  '#db7093', // 20 - Cana
+  '#c71585', // 40 - Arroz
+  '#ff69b4', // 41 - Algodão
+  '#ff1493', // 43 - Outras Lavouras Temporárias
+  '#7b4173', // 21 - Lavoura Permanente
+  '#b3588e', // 22 - Café
+  '#e082b3', // 23 - Citrus
+  '#fbb4ae', // 24 - Outras Lavouras Permanentes
+  '#bcbddc', // 30 - Silvicultura
+  '#756bb1', // 27 - Mosaico de Usos
+  '#f2f0f7', // 31 - Área não Vegetada
+  '#cccccc', // 33 - Área Urbanizada
+  '#ff0000', // 35 - Mineração
+  '#a63603', // 36 - Área de extração
+  '#fd8d3c', // 37 - Área com infraestrutura
+  '#99d8c9', // 13 - Outros
+  '#ccebc5', // 28 - Aqüicultura
+  '#a6bddb', // 9 - Corpo d’Água
+  '#ffffff', // 99 - Sem dados
+];
+Map.addLayer(uso2023, {min: 0, max: 49, palette: palette}, 'MapBiomas 2023'); // Adiciona o uso e cobertura do solo de 2023 ao mapa com a paleta de cores definida
+// =============================================
+// 11. Exportações (exemplo com NDWI Landsat)
+// =============================================
+// Exportação 1
+Export.image.toDrive({
+  image: uso2023.clip(bacia).reproject({crs: 'EPSG:31983', scale: 30}),  // Recorta a imagem selecionada à bacia e reprojeta para SIRGAS 2000 / UTM 23S com resolução
+  description: 'uso2023_Riachao_2021_UTM23S',  // Nome da tarefa de exportação que aparecerá no painel Tasks do GEE
+  folder: 'EarthEngine_Export',  // Pasta no Google Drive onde a imagem será salva
+  fileNamePrefix: 'uso2023_Riachao_2021_UTM23S',  // Nome do arquivo exportado (sem extensão)
+  region: bacia.union().geometry(),  // Define a região de exportação como a união dos polígonos da bacia
+  scale: 30,  // Resolução espacial da exportação (10 ou 30 metros)
+  crs: 'EPSG:31983',  // Sistema de referência de coordenadas: SIRGAS 2000 / UTM Zona 23S
+  maxPixels: 1e13  // Limite máximo de pixels permitido na exportação para evitar erros de tamanho
+});
+// Exportação 2
+Export.image.toDrive({
+  image: falseColorMoistureS2.clip(bacia).reproject({crs: 'EPSG:31983', scale: 10}),  // Recorta a imagem selecionada à bacia e reprojeta para SIRGAS 2000 / UTM 23S com resolução
+  description: 'falseColorMoistureS2_Riachao_2021_UTM23S',  // Nome da tarefa de exportação que aparecerá no painel Tasks do GEE
+  folder: 'EarthEngine_Export',  // Pasta no Google Drive onde a imagem será salva
+  fileNamePrefix: 'falseColorMoistureS2_Riachao_2021_UTM23S',  // Nome do arquivo exportado (sem extensão)
+  region: bacia.union().geometry(),  // Define a região de exportação como a união dos polígonos da bacia
+  scale: 10,  // Resolução espacial da exportação (10 ou 30 metros)
+  crs: 'EPSG:31983',  // Sistema de referência de coordenadas: SIRGAS 2000 / UTM Zona 23S
+  maxPixels: 1e13  // Limite máximo de pixels permitido na exportação para evitar erros de tamanho
+});
+  //Exportação 3
+Export.image.toDrive({
+  image: falseColorMoistureL.clip(bacia).reproject({crs: 'EPSG:31983', scale: 30}),  // Recorta a imagem selecionada à bacia e reprojeta para SIRGAS 2000 / UTM 23S com resolução
+  description: 'falseColorMoistureL_Riachao_2016_UTM23S',  // Nome da tarefa de exportação que aparecerá no painel Tasks do GEE
+  folder: 'EarthEngine_Export',  // Pasta no Google Drive onde a imagem será salva
+  fileNamePrefix: 'falseColorMoistureS2_Riachao_2016_UTM23S',  // Nome do arquivo exportado (sem extensão)
+  region: bacia.union().geometry(),  // Define a região de exportação como a união dos polígonos da bacia
+  scale: 30,  // Resolução espacial da exportação (10 ou 30 metros)
+  crs: 'EPSG:31983',  // Sistema de referência de coordenadas: SIRGAS 2000 / UTM Zona 23S
+  maxPixels: 1e13  // Limite máximo de pixels permitido na exportação para evitar erros de tamanho
+});
